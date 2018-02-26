@@ -1,0 +1,54 @@
+-- Search every column in every table for a specific string using sys.objects
+-- Information schema is more portable comapared to sys.object and seems to perform better even tho theoritically it shouldn't
+-- Narrow the scope so that it runs faster
+
+DECLARE @search_string VARCHAR(100), 
+        @table_name    SYSNAME, 
+        @table_id      INT, 
+        @column_name   SYSNAME, 
+        @sql_string    VARCHAR(2000) 
+
+SET @search_string = 'string'												 -- edit here for the search string
+DECLARE tables_cur CURSOR FOR 
+  SELECT NAME, 
+         object_id 
+  FROM   sys.objects 
+  WHERE  type = 'U' 
+         AND NAME LIKE '%work%'													--edit here to restrict table name
+
+OPEN tables_cur 
+
+FETCH next FROM tables_cur INTO @table_name, @table_id 
+
+WHILE ( @@FETCH_STATUS = 0 ) 
+  BEGIN 
+      DECLARE columns_cur CURSOR FOR 
+        SELECT NAME 
+        FROM   sys.columns 
+        WHERE  object_id = @table_id 
+               AND system_type_id = 56											-- edit here to restrict data type (I think 56 is int)
+               AND max_length = 4												-- edit here to restrict data type
+               AND PRECISION = 10												-- edit here to restrict data type
+			   AND NAME LIKE '%name%'											-- edit here to restrict column name
+	           --AND NAME NOT IN ('col_name')							-- edit here to restrict column name
+      OPEN columns_cur 
+
+      FETCH next FROM columns_cur INTO @column_name 
+
+      WHILE ( @@FETCH_STATUS = 0 ) 
+        BEGIN 
+            SET @sql_string = 'IF EXISTS (SELECT * FROM ' + @table_name 
+                              + ' WHERE [' + @column_name 
+                              + ']              LIKE ''%' + @search_string 
+                              + '%'') PRINT ''' + @table_name + ', ' 
+                              + @column_name + '''' 
+
+            EXECUTE(@sql_string) 
+            FETCH next FROM columns_cur INTO @column_name 
+        END 
+      CLOSE columns_cur 
+      DEALLOCATE columns_cur 
+      FETCH next FROM tables_cur INTO @table_name, @table_id 
+  END 
+CLOSE tables_cur 
+DEALLOCATE tables_cur 
