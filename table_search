@@ -1,0 +1,101 @@
+-- Search for tables and or columns with certain name, ordered by number of records in the tables
+-- make sure your connected to the intended database 
+
+SELECT DISTINCT t.NAME              AS [TableName], 
+                c.[name]            AS [ColumnName], 
+                c.[column_id]       AS [ColumnNumber], 
+                d.[name]            AS [DataType], 
+                d.[max_length]      AS [MaxLength], 
+                d.[precision]       AS [Precision], 
+                c.[is_identity]     AS [IsId], 
+                c.[is_nullable]     AS [IsNullable], 
+                c.[is_computed]     AS [IsComputed], 
+                d.[is_user_defined] AS [IsUserDefined], 
+                t.[modify_date]     AS [DateModified], 
+                t.[create_date]     AS [DateCreated], 
+                Sum(p.rows)         AS [RowCount], 
+                k.constrainttype    AS [PrimaryKey] 
+FROM   sys.tables t 
+       INNER JOIN sys.indexes i 
+               ON t.object_id = i.object_id 
+       INNER JOIN sys.partitions p 
+               ON i.object_id = p.object_id 
+                  AND i.index_id = p.index_id 
+       INNER JOIN sys.columns c 
+               ON t.object_id = c.object_id 
+       INNER JOIN sys.types d 
+               ON c.user_type_id = d.user_type_id 
+       LEFT JOIN (SELECT tab.NAME     AS [Table], 
+                         constr.xtype AS [ConstraintType], 
+                         clmns.NAME   AS [ColumnName] 
+                  FROM   sysobjects AS tab 
+                         INNER JOIN sysobjects AS constr 
+                                 ON( constr.parent_obj = tab.id 
+                                     AND constr.type IN ( 'K', 'F' ) ) 
+                         INNER JOIN sys.indexes AS i 
+                                 ON( ( i.index_id > 0 
+                                       AND i.is_hypothetical = 0 ) 
+                                     AND ( i.object_id = tab.id ) 
+                                     AND i.NAME = constr.NAME ) 
+                         INNER JOIN sys.index_columns AS ic 
+                                 ON ( ic.column_id > 0 
+                                      AND ( ic.key_ordinal > 0 
+                                             OR ic.partition_ordinal = 0 
+                                             OR ic.is_included_column != 0 ) ) 
+                                    AND ( ic.index_id = Cast(i.index_id AS INT) 
+                                          AND ic.object_id = i.object_id ) 
+                         INNER JOIN sys.columns AS clmns 
+                                 ON clmns.object_id = ic.object_id 
+                                    AND clmns.column_id = ic.column_id 
+                  WHERE  tab.xtype = 'U') k 
+              ON ( t.[name] = k.[table] 
+                   AND c.[name] = k.columnname ) 
+WHERE  i.index_id <= 1 
+--AND t.NAME LIKE '%tblname%'                                  -- edit here for table name  
+--AND c.NAME LIKE '%colname%'                            -- edit here for column name 
+--AND k.ConstraintType = 'PK'								    -- edit here for primary keys
+GROUP  BY t.NAME, 
+          i.object_id, 
+          i.index_id, 
+          i.NAME, 
+          c.NAME, 
+          d.[name], 
+          d.[max_length], 
+          d.[precision], 
+          c.[is_identity], 
+          c.[is_nullable], 
+          c.[is_computed], 
+          d.[is_user_defined], 
+          t.[modify_date], 
+          t.[create_date], 
+          c.[column_id], 
+          k.constrainttype 
+ORDER  BY Sum(p.rows) DESC, 
+          tablename, 
+          column_id, 
+          columnname; 
+
+
+
+
+
+
+SELECT DISTINCT t.NAME              AS [TableName], 
+                t.[modify_date]     AS [DateModified], 
+                t.[create_date]     AS [DateCreated], 
+                Sum(p.rows)         AS [RowCount] 
+FROM   sys.tables t 
+       INNER JOIN sys.indexes i 
+               ON t.object_id = i.object_id 
+       INNER JOIN sys.partitions p 
+               ON i.object_id = p.object_id 
+                  AND i.index_id = p.index_id 
+WHERE  i.index_id <= 1 
+--AND t.NAME LIKE '%tblname%'                                 -- edit her to search for table name  
+--AND c.NAME LIKE '%image%'                                     -- edit her to search for column name 
+GROUP  BY t.NAME, 
+          t.[modify_date], 
+          t.[create_date] 
+ORDER  BY Sum(p.rows) DESC, 
+          tablename 
+
