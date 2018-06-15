@@ -1,0 +1,2401 @@
+# read in certain fiels in a directory
+file_names <- list.files(path = raw2, pattern = "irmf|ma|inf")
+#file_names <- list.files(path = raw2, pattern = "1098")
+df_names <- c()
+i <- 1
+
+for(name in file_names) {
+  # create var name for df
+  df_name <- str_replace(name, "(.+_.+)_.+_.+", "\\1")
+  # read in data
+  df <- read_tsv(paste0(raw2, name), na = c("", " ", "NULL"),
+                         col_types = cols(.default = "c"))
+  names(df)[1] <- 'ext_ssn'
+  assign(df_name, df) # attach df to variable name
+  print(paste0("done with: ", df_name, " ", i,"/",length(file_names)))
+  i <- i+1
+  df_names <- c(df_names, df_name)
+}
+
+# withholding z score and elective deferrals ratio
+# should probably use irmf_w2_c here instead of irmf_w2
+# for 2013 should use all of G and H instead of just 99k of them for z score to
+# be more consistent when creating feature for 2014, or all w2s
+irmf_w2_withheld_deferrals <- irmf_w2 %>%
+  select(ext_ssn, fdtmfilingperiod, fcurwages, fcurtaxwithheld, fcurelectivedeferrals) %>%
+  mutate_at(c('fcurwages', 'fcurtaxwithheld', 'fcurelectivedeferrals'), funs(as.double)) %>%
+  arrange(ext_ssn, fdtmfilingperiod, desc(fcurwages)) %>%
+  group_by(ext_ssn, fdtmfilingperiod) %>%
+  mutate(wage_rank = row_number()) %>%
+  ungroup() %>%
+  filter(wage_rank == 1) %>%
+  filter(fcurwages != 0) %>%
+  mutate(fcurwages_cut = cut(fcurwages, breaks = c((max(fcurwages)-1)/520)),
+         maxWage_deferralWageRatio = fcurelectivedeferrals / fcurwages) %>%
+  group_by(fcurwages_cut) %>%
+  mutate(maxWage_520cut_withheld_zscore = scale(fcurwages)) %>%
+  ungroup() %>%
+  select(ext_ssn, fdtmfilingperiod,
+         maxWage_520cut_withheld_zscore, maxWage_deferralWageRatio) %>%
+  mutate(maxWage_520cut_withheld_zscore = 
+           ifelse(!is.finite(maxWage_520cut_withheld_zscore), 
+                  0, maxWage_520cut_withheld_zscore),
+         maxWage_deferralWageRatio = 
+           ifelse(!is.finite(maxWage_deferralWageRatio), 0, maxWage_deferralWageRatio))
+		   
+		   
+# change certain columns to replace all na with zero and cast as double		   
+  mutate_at(vars(contains("fstrFilingStatus_")), funs(replace(., is.na(.), 0))) %>%  
+  mutate_at(vars(contains("fstrFilingStatus_")), funs(as.double(.)))		   
+  
+  ---
+title: "INF Model V2"
+author: "Tommy Lang"
+date: "6/4/2018"
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    fig_height: 4
+    fig_width: 7
+    highlight: tango
+    number_sections: yes
+    theme: readable
+    toc: yes
+    toc_float: yes
+  html_notebook:
+    code_folding: hide
+    df_print: paged
+    fig_height: 4
+    fig_width: 7
+    highlight: tango
+    number_sections: yes
+    theme: readable
+    toc: yes
+    toc_float: yes
+---
+
+
+# Overview
+
+The purpose of this document is to describe the methods used to identify individuals that   
+have a tax liability within a subpopulation of non - filers that predominately do not even   
+have a filing requirement.
+
+# Introduction
+
+This Individual Non Filer (INF) project started in early 2017 to treat a subpopulation of  
+non - filers identified as G and H. These groups have a connection to MA based on the MA  
+Department of Revenue (DOR) receiving tax form data from the IRS under an exchange   
+agreement. However, the large majority of the individuals in G and H do not have a tax   
+liability with MA. For this reason the MA DOR have historically not treated these groups.   
+The goal of this project was to identify individuals within G and H that did have a tax   
+liability with MA.  
+
+We started by selecting random samples of individuals within G and H and sending them  
+letters that stated that we believed that they owed taxes to MA for tax year 2013 and to   
+call us if they believed we were wrong. There were two versions of this letter, one with a  
+bill (Hard Letter) and one without a bill (Soft Letter). Certain types of responses from   
+the Soft Letters were collected in Excel spreadsheets. Based on very negative feedback  
+from letter recipients and DOR employees we filtered out certain types of individuals from  
+being sent a letter. These filters changed over time.   
+
+In September of 2017 I started working on a predictive model using the responses from the  
+Soft Letters. The model predicted whether or not a individual had a filing requirement but  
+not necessarily a tax liability. At the time I did not believe the responses from Soft  
+Letters would provide enough information to predict tax liability. The responses were  
+mainly in the form of call logs where individuals may say that they are sending in a tax   
+return but I wouldn't be able to determine if it was a zero tax due return. Also I   
+believed that that weren't enough Hard Letters sent to build a model from that data at the  
+time.  
+
+In December of 2017 about 16,000 Hard Letters were issued with about 4,600 of those   
+letters based on model predictions that identified individuals that had a filling   
+requirement. The letters were issued in a very short time frame and the feedback from   
+letter recipients, DOR staff and management was extremely negative. However the responses   
+from letter recipients that received letters based on the model predictions was  
+substantially better in terms of call and payment volume.  
+
+In January of 2018 after realizing that predicting a filing requirement was not enough I   
+started developing a model to predict whether or not individuals had a tax liability   
+(INF Model V2). I tried using the same predictors as the first model and responses from   
+the tax year 2013 Hard Letters but model performance was poor.   
+
+In February of 2018 I started creating different predictors for INF Model V2. I started   
+off rigorously cleaning data and documenting my work but it was too time consuming. I had   
+a hard deadline because I was resigning to go back to school. Therefore I applied the  
+80/20 rule while preparing the data and creating the model. The model ended up being good   
+enough despite not completing all of the steps that I should have. The goal was to have   
+Precision $(\frac{TP}  {TP + FP})$ of the model to be about 0.75 - 0.80 which it exceeds.   
+This model or some iteration of it will be used to send letters to tax year 2014 Hard   
+Letter recipients.  
+
+## Packages and Custom Functions
+
+The code chunks below are the functions, packages and variables I used for this document.
+
+```{r, results="hide"}
+LoadPackages <- function(packages) {
+  # Load or install packages if they aren't already loaded.
+  #
+  # Args:
+  #   packages: a vector of package names
+  #
+  for (package in packages) {
+    if (!require(package, character.only=T, quietly=T)) {
+      if (!package %in% installed.packages()) install.packages(package)
+      library(package, character.only=T)
+    }
+  }
+}
+
+LoadPackages(c("readr", "dplyr", "Boruta", "data.table", 
+               "caret", "ggplot2", "binom", "boot",
+               'ranger', "e1071", "rpart", "tidyr",
+               'reshape2', 'MLmetrics', 'ModelMetrics'))
+
+customSummary <- function (data, lev = NULL, model = NULL) 
+{
+  lvls <- levels(data$obs)
+  if (length(lvls) > 2) 
+    stop(paste("Your outcome has", length(lvls), "levels. The classSummary() 
+               function isn't appropriate."))
+  if (!all(levels(data[, "pred"]) == lvls)) 
+    stop("levels of observed and predicted data do not match")
+  data$y = as.numeric(data$obs == lvls[2])
+  prAUC <- MLmetrics::PRAUC(y_pred = data[, lev[1]], y_true = 
+                              ifelse(data$obs == lev[1], 1, 0))
+  rocAUC <- ModelMetrics::auc(ifelse(data$obs == lev[2], 0,1), data[, lvls[1]])
+  out <- c(prAUC, rocAUC, 
+           caret::sensitivity(data[, "pred"], data[, "obs"], lev[1]), 
+           caret::specificity(data[, "pred"], data[, "obs"], lev[2]),
+           caret::precision(data = data$pred, reference = data$obs, relevant = lev[1]),
+           caret::F_meas(data = data$pred, reference = data$obs, relevant = lev[1]))
+  names(out) <- c("PR-AUC", "ROC-AUC", "Sens/Rec", "Spec", "Prec", "F")
+  out
+}
+
+eightSummary <- function(...) c(customSummary(...), defaultSummary(...))
+
+# ex. cutoffs(glmnet, eval, eval$overall_response, 400,700, 1000) 
+cutoffs <- function(model, test_set, response, low, high, divisor) {
+  pred <- predict(model, test_set, type = "prob")
+  cutoff <- low
+  j <- 1
+  metrics_cutoffs <- data.frame()
+  for(i in low:high){
+    cut <- cutoff / divisor
+    
+    colname <- paste0("cut",cut)
+    pred[[colname]] <- ifelse(pred$pos > cut, "pos","neg")
+    pred[[colname]] <- factor(pred[[colname]])
+    pred[[colname]] <- relevel(pred[[colname]], "pos")
+    cutoff <- cutoff +1
+    
+    cm <- caret::confusionMatrix(pred[[colname]], response, positive = "pos")
+    metrics_cutoffs[j,1] <- cut
+    metrics_cutoffs[j,2] <- cm$overall[1]
+    metrics_cutoffs[j,3] <- cm$overall[2]
+    metrics_cutoffs[j,4] <- cm$byClass[5]
+    metrics_cutoffs[j,5] <- cm$byClass[6]
+    metrics_cutoffs[j,6] <- cm$byClass[2]
+    colnames(metrics_cutoffs) = c('Prob_Cutoff', 'Accuracy', "Kappa", 
+                                  "Precision", "Recall", "Specificity")
+    j <- j+1
+  }
+  mets_pred <-  list(metrics_cutoffs,pred)
+  return(mets_pred)
+}
+
+data <- '/data/aap/TL_WD/INF_TL/data/'
+data3 <- '/data/aap/TL_WD/INF_TL/data/raw2/'
+raw2 <- '/data/aap/TL_WD/INF_TL/data/raw2/'
+raw14 <- '/data/aap/TL_WD/INF_TL/data/raw14/'
+```
+
+
+# Response Variable
+
+The response variable for the model is either positive (pos) or negative (neg). Ultimately  
+pos is intended to mean that an individual has a tax liability and neg means that they   
+don't. The model predicts whether the letter recipient would have a pos or neg response   
+given that they respond. It is based on the responses from the Hard Letters sent for tax   
+year 2013. The precise definition of pos and neg is below:    
+
+Pos if one of the following criteria is met:  
+- An original return was filed and the tax due is greater than zero.        
+- Payments from tbl_payments but excluding 'XOFABP', 'XOFCMP', 'XOFLOT' payment types less    
+  garnishment payments is greater than zero and estimated return was not reversed.      
+- Payments from tbl_payment but excluding 'XOFABP', 'XOFCMP', 'XOFLOT' payment types less  
+  garnishment payments is greater than zero and no return filed, no work item and no   
+  appeal case.      
+- Payments from tbl_payment but excluding 'XOFABP', 'XOFCMP', 'XOFLOT' payment types less     
+  refunds from tblrfnrefund is greater than zero and no return filed.      
+    
+Neg if one of the following criteria is met:  
+- Return is filed and the tax due is zero.  
+- There's an appeal case or work item completed and estimated return is reversed and a   
+  tax return was not filed.  
+- The estimated return is reversed and it wasn't reversed by a member of the AA team and  
+  wasn't reversed by the system and an original return was not filed.    
+
+The response variable changes over time. People may pay and then later on file a zero   
+zero return or the system might just for some reason reverse the estimated return and   
+issue a refund. The data I used for the response variable is as of 6/8/18.  
+   
+If an individual meets criteria for both pos and neg then they are dropped from the   
+training and testing data. There was 27 of these cases as of 6/8/18.   
+
+Certain types of payments and estimated returns reversed by a member of the AA team or the  
+system was excluded to keep the response variable consistent. Some types of payments are  
+not voluntary. The letter recipient may not necessarily agree with the notice but we may  
+just take their funds without them knowing. The system will reverse estimated returns if  
+the letter was returned as undeliverable. These are not responses from the letter  
+recipient so they were filtered out before applying the criteria.    
+
+The bar chart below shows the number of positive and negative responses from the Hard   
+Letters sent for tax year 2013.  
+
+```{r, results="hide"}
+# The response variable was prepared in a separate file and read in here
+resp <- read_rds(paste0(data,"hl_respv1_060818.rds"))
+resp <- resp %>% dplyr::select(SSN, resp, discovery.key) %>%
+  dplyr::mutate_at('resp', funs(as.factor))
+resp$resp <- relevel(resp$resp, "pos")
+```
+
+```{r}
+resp_plot <- resp %>% 
+  mutate(Response = ifelse(resp == "pos", "Positive", "Negative")) 
+
+# responses and results from the first model
+mod <- 412
+n_mod_pos <- resp_plot %>% filter(resp == "pos" & discovery.key == mod) %>% nrow()
+n_mod_neg <- resp_plot %>% filter(resp == "neg" & discovery.key == mod) %>% nrow()
+n_mod_resp <- n_mod_pos + n_mod_neg
+p_mod_pos <- ((n_mod_pos / n_mod_resp) * 100) %>% round(2)  
+
+# create df for bar char of responses
+n_pos <- resp_plot %>% filter(resp == "pos") %>% nrow()
+n_neg <- resp_plot %>% filter(resp == "neg") %>% nrow()
+p_pos <- n_pos / (n_pos + n_neg) * 100  
+p_pos <- round(p_pos,digits = 2)
+p_neg <- n_neg / (n_pos + n_neg) * 100
+p_neg <- round(p_neg ,digits = 2)
+pos_info <- paste0(n_pos, " ", "(", p_pos, "%", ")")
+neg_info <- paste0(n_neg, " ", "(", p_neg, "%", ")")
+
+resp_plot2 <- data.frame("Response" = c("Positive", "Negative"), 
+                         "Count" = c(n_pos, n_neg),
+                         "Text" = c(pos_info, neg_info))  
+
+# bar chart of responses
+ggplot(resp_plot2, aes(x = Response, y = Count, fill = Response)) + 
+  geom_col() +
+  theme_bw() +
+  labs(title = "Taxpayer Response") +
+  scale_fill_manual("Response", values = 
+                      c("Positive" = "indianred1", "Negative" = "#00BFFF")) +
+  geom_text(aes(y = Count, label = Text, vjust= 1.1), size = 4) +
+  theme(plot.title = element_text(hjust = .5, size = 16, face = "bold"),
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=14))
+```
+
+Out of these responses `r n_mod_resp` are from predictions of the first INF Model and `r p_mod_pos`% of  
+the these responses are positive. This is consistent with expectations and the results   
+from the evaluating that model on the test set.   
+
+# Predictor Variables
+
+The predictor variables used are derived from Information Returns Master File (IRMF) data   
+that the DOR receives from the IRS, MA withholding data, MA tax filing history, driver's   
+license data from the RMV and potential letter recipient addresses. The data was prepared   
+in a separate file and read in here.    
+
+The abbreviations MA, NMA, NTS, and HFS mean MA state, Non MA state, No Tax State, High  
+Frequency State respectively and they refer to the payee state on the IRMF Form.    
+
+The abbreviations 1yb, cy and 1yf mean 1 year before target year, current target year, and  
+1 year forward of target year respectively.    
+
+These variables were primarily designed and selected based from expert knowledge. 
+```{r}
+all_features <- read_rds(paste0(data, "features_V2_2013.rds"))  %>% 
+  dplyr::select(-cy_withheld_zscore)
+
+
+predictor_names <- all_features %>% dplyr::select(-ext_ssn) %>% names() %>% 
+  as.data.frame()
+names(predictor_names) <- c("Predictor_Name")
+predictor_names
+# join the predictors with the response variable
+all <- resp %>% dplyr::inner_join(all_features, c("SSN" = "ext_ssn")) %>% 
+  dplyr::select(-SSN, -discovery.key)
+```
+
+
+# Feature Selection
+
+I used Boruta package to help narrow down the optimal set of predictors (Kursa). Many   
+machine learning algorithms will have a decrease in performance when the number of   
+variables is not optimal. The Boruta algorithm is a novel feature selection method that is   
+designed as a wrapper around the Random Forest Algorithm (Boruta is a god of the forest   
+in the Slavic mythology). It iteratively removes the predictors which are suggested by a   
+statistical test to be less relevant than random probes. The algorithm confirmed that all   
+of the predictors except one is significant. The table below shows the results from   
+running the algorithm:
+
+```{r, cache = TRUE, results="hide"}
+set.seed(888)
+boruta_train <- Boruta(resp ~., data = all, doTrace = 2, maxRuns = 88)
+# print(boruta_train)
+
+final_boruta <- TentativeRoughFix(boruta_train)
+# print(final_boruta)
+
+imp_predictors <- getSelectedAttributes(final_boruta, withTentative = F)
+
+boruta_df <- setDT(attStats(final_boruta), keep.rownames =TRUE)[]
+
+
+imp <- all[ ,c("resp", imp_predictors)]
+```
+
+```{r}
+# Results of from the Boruta Algorithm
+boruta_df %>% arrange(desc(meanImp))
+```
+
+
+# Model Selection
+
+The data was split into a training, evaluation and a test set using stratified random   
+sampling to preserve class balance. Four types of models (RandomForest, Elastic Net  
+Regression, Recursive Partitioning Trees and K - Nearest Neighbors) were created. The more  
+important parameters were tuned using 10 fold cross validation with 5 repeats. Other less  
+important parameters were set to the default values to save time. The area under the  
+precision recall curve was used to select the optimal model. This metric provides useful  
+insights into future model performance because the positive class is mainly what we're  
+interested in. 
+
+```{r}
+# Create train, evaluation and test sets
+set.seed(88)
+split_index_train <- createDataPartition(imp$resp, p = .7, list = FALSE)
+train <- imp[split_index_train,]
+not_train <- imp[-split_index_train,]
+split_index_eval <- createDataPartition(not_train$resp, p = .4, list = FALSE)
+eval <- not_train[split_index_eval,]
+test <- not_train[-split_index_eval,]
+```
+
+```{r, cache = TRUE, results="hide", eval = FALSE}
+ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 5,
+                     summaryFunction = eightSummary,
+                     classProbs = TRUE, verboseIter = TRUE)
+
+len <- 20
+
+set.seed(888)
+rf <- train(resp ~ ., data = train, tuneLength = len, num.tree = 2000, 
+            importance = 'impurity', metric = "PR-AUC", method = "ranger", 
+            trControl = ctrl)
+
+set.seed(888)
+glmnetGrid <- expand.grid(alpha = seq(0,1, length = len),
+                          lambda = seq(0.0001, 1, length = 100))
+glmnet <- train(resp ~ ., data = train, tuneGrid = glmnetGrid,
+                preProcess = c("center", "scale"), metric = "PR-AUC",
+                method = "glmnet", trControl = ctrl)
+
+set.seed(888)
+rpart <- train(resp ~ ., data = train, tuneLength = len,
+                 metric = "PR-AUC", method = "rpart", trControl = ctrl)
+
+set.seed(888)
+knn <- train(resp ~ ., data = train, tuneLength = len,
+             preProcess = c("center", "scale"), metric = "PR-AUC",
+             method = "knn", trControl = ctrl)
+
+saveRDS(rf, paste0(data,"INF_V2_rf.rds"))
+saveRDS(glmnet, paste0(data,"INF_V2_glmnet.rds"))
+saveRDS(rpart, paste0(data,"INF_V2_rpart.rds"))
+saveRDS(knn, paste0(data,"INF_V2_knn.rds"))
+
+```
+
+```{r}
+# Don't want to run the algos everytime I knit the document so I saved them and load them
+# back in here
+rf <- readRDS(paste0(data,"INF_V2_rf.rds"))
+glmnet <- readRDS(paste0(data,"INF_V2_glmnet.rds"))
+rpart <- readRDS(paste0(data,"INF_V2_rpart.rds"))
+knn <- readRDS(paste0(data,"INF_V2_knn.rds"))
+```
+
+
+## Comparisons
+
+The box plots in the plot below shows the performance metric for each fold and each repeat   
+from cross validation for each model type. The dot in the middle of each box is the mean   
+of the respective performance metric. Box plots are useful for looking at the spread of a  
+statistic. The plot shows that the RandomForest model performs the best across all of the  
+metrics and the spread looks acceptable. Therefore the RandomForest model will be used to  
+make predictions. 
+
+```{r}
+# resamples checks that the models are comparable and that they used the same
+# training scheme (trainControl config). This object contains the evaluation metrics for
+# each fold and each repeat for each evaluated algorithm
+results <- resamples(list(rf = rf, glmnet = glmnet, rpart = rpart, knn = knn))
+
+# summary(results)
+
+scales <- list(x=list(relation="free"), y=list(relation="free"))
+bwplot(results, scales=scales, main = "Model Metrics Comparison")
+```
+
+## Vairable Importance
+
+The plot below shows the top 15 most important predictors in the RandomForest model. The   
+importance measure is based on total decrease in node impurities from splitting on the   
+variable, averaged over all trees.
+```{r}
+plot(varImp(rf), top = 15, main = "Model Variable Importance")
+```
+
+
+# Validation and Ajustments
+
+Here the RandomForest model is validated using the evaluation and test sets. Also some   
+additional adjustments are made to the predictions.
+
+## Evaluation Set 
+
+The performance metrics of the final model on the evaluation set is below:
+```{r}
+pred_prob <- predict(rf, eval, type = "prob")[, "pos"]
+
+# PR AUC
+eval_pr <- MLmetrics::PRAUC(y_true = eval$resp,  y_pred = pred_prob) %>%
+  round(4)
+
+print(paste0("The area under the PR curve is: ", eval_pr))
+
+# ROC AUC
+eval_auc <- pROC::auc(eval$resp, pred_prob) %>% as.data.frame()
+
+print(paste0("The area under the ROC curve is: ", round(eval_auc$.,4)))
+
+# Confusion Matrix
+caret::confusionMatrix(predict(rf, eval), eval$resp)
+```
+
+
+### Alternative Probability Cutoff
+
+An alternative probability cutoff for the predictions is chosen in favor of precision   
+$(\frac{TP}  {TP + FP})$ 
+while balancing recall $(\frac{TP}  {TP + FN})$. This will increase the number of false   
+negatives and therefore decrease the number letters that this model will suggest to send.   
+However the proportion of true positives to positive predictions (precision) will increase   
+(more accurate positive predictions). The false negatives that will be left behind can be   
+treated with an improved iteration of this model (the false negatives from this model will   
+be predicted as positive with a better model). Therefore we don't lose any potential   
+revenue by favoring precision for the first iteration of the model.    
+
+The line plot below shows the value of accuracy, precision and recall with each alternative  
+probability cutoff. The dotted vertical line indicates the value of the chosen alternative  
+probability cutoff.
+
+```{r}
+alt_prob <- cutoffs(rf, eval, eval$resp, 450,700, 1000)[1] 
+
+cut <- 0.634	
+
+alt_prob_plot <- as.data.frame(alt_prob) %>% 
+  dplyr::select(Prob_Cutoff, Accuracy, Precision, Recall) %>% 
+  melt(id = "Prob_Cutoff") %>%
+  mutate(Metric = variable) 
+
+ggplot(alt_prob_plot, aes(x = Prob_Cutoff, y = value, color = Metric)) +
+  geom_line() +
+  labs(title = "Alternative Probability Cutoff",
+       x = "Probability Cutoff", 
+       y = "Metric Value") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = .5, size = 16, face = "bold"),
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=14),
+        axis.line = element_line(colour = "black")) + 
+  scale_y_continuous(breaks = seq(.5,.95, by =.05)) +
+  geom_vline(xintercept = cut, linetype="dotted", 
+                color = "orange1", size=.7)
+
+```
+
+
+## Test Set
+
+The performance metrics of the final model on the test set with the alternative probability  
+cutoff is below:
+
+```{r}
+pred_prob <- predict(rf, test, type = "prob")[, "pos"]
+
+# PR AUC
+test_pr <- MLmetrics::PRAUC(y_true = test$resp, y_pred = pred_prob) %>%
+  round(4)
+
+print(paste0("The area under the PR curve is: ", test_pr))
+
+# ROC AUC
+test_auc <- pROC::auc(test$resp, pred_prob ) %>% as.data.frame()
+
+print(paste0("The area under the ROC curve is: ", round(test_auc$.,4)))
+
+pred_prob <- data_frame("pos" = pred_prob)
+pred_class <- pred_prob %>% mutate(pred = ifelse(pos >= cut, "pos", "neg"))
+pred_class$pred <- factor(pred_class$pred)
+pred_class$pred <- relevel(pred_class$pred, "pos")
+
+# Confusion Matrix
+caret::confusionMatrix(pred_class$pred, test$resp)
+```
+
+
+## Predictor Space Evaluation
+
+Model performance on unseen data will be very similar to how it performs on the test set  
+if the test set is a representative sample of the unseen data. This means that the unseen  
+observations will have similar characteristics and will occupy similar parts of the   
+predictor space as the data the model was trained on. Here I use a variation of a method   
+described by Hastie et al. (2008) to identify whether or not a new observation is from  
+the training data. A classification model is created to predict whether or not a new   
+observation is a member of the training data. I refer to this as the Similarity Model.  
+
+```{r}
+# Randomly permute the predictors from the training set
+# Row bind the original training data on top of the permuted data
+# Create a classification vector that identifies the training and permuted data
+
+set.seed(44)
+train_pred <- train %>% dplyr::select(-resp)
+permute_train <- apply(train_pred, 2, function(x) sample(x))
+sim_x <- rbind(train_pred, permute_train)
+group_vals <- c("train", "random")
+group_y <- factor(rep(group_vals, each = nrow(train_pred)))
+sim_x$train <- group_y
+sim_x <- sim_x %>%
+  dplyr::mutate(train = ifelse(train == "train", "pos", "neg")) %>%
+  dplyr::mutate_at("train", as.factor)
+sim_x$train <- relevel(sim_x$train, "pos")
+```
+
+```{r}
+# Create train and test splits
+set.seed(8)
+index_sim <- createDataPartition(sim_x$train, p = .8, list = FALSE)
+train_sim <- sim_x[index_sim,]
+test_sim <- sim_x[-index_sim,]
+```
+
+```{r, cache = TRUE, results="hide"}
+# Train a classification model to predict if an observation is a member of the training set
+ctrl2 <- trainControl(method = "cv", number = 10,
+                     summaryFunction = eightSummary,
+                     classProbs = TRUE, verboseIter = TRUE)
+
+set.seed(88)
+rf_sim <- train(train ~., data = train_sim, importance = 'impurity',
+                method = "ranger", tuneLength = 20,
+                trControl = ctrl2, metric = "Prec")
+```
+
+The performance of the Similarity Model on a test set is shown below:  
+```{r}
+# Confusion Matrix
+caret::confusionMatrix(predict(rf_sim, test_sim), test_sim$train)
+```
+
+The Similarity Model is used to predict whether or not an observation in 2014 G and H   
+groups is a member of the training data used to build the INF Model V2. The model   
+predictions and proportion table below suggests that the large majority of 2014   
+observations is represented in the training data.
+ 
+```{r}
+features_14 <- read_rds(paste0(data, "features_V2_2014.rds"))
+
+sim_pred_14 <- predict(rf_sim, features_14) %>% as.data.table()
+names(sim_pred_14) <- "sim_predict"
+
+prop.table(table(sim_pred_14$sim_predict))
+```
+
+
+## Additional Adjustments
+
+Two adjustments to the INF Model predictions are made to increase precision, prevent   
+extrapolated predictions and to make the predictions more sensible. As I explained before,  
+precision is favored over recall because we are sending letters to people with positive   
+predictions. A bad letter can't be un-sent but a good letter that wasn't sent can later  
+be sent by creating better iteration of this model to identify the false negatives  
+that were left behind.  
+
+The first adjustment is to adjust all predictions as negative if the Similarity Model   
+predicts that the observation is not a member of the training set used to create the INF   
+Model. This helps prevent extrapolated predictions which may be unreliable. The second   
+adjustment is to adjust all predictions as negative if the current target year MA income   
+is less than $8,000. My definition of MA income is loose and if an observation doesn't   
+have at least $8,000 of it then there is only a small chance of that observation even   
+having a filing requirement. This increases precision and makes the predictions more   
+sensible so that we receive less negative feedback from stakeholders.    
+
+These adjustments should be reevaluated in the future. I included these now because there  
+is additional risk from using a model built from responses of one tax year to predict   
+responses of another tax year. Predictive models assume that the underlying system that   
+generated the current data for training the model will continue to generate future data.  
+The majority of the data used for the model is IRMF data from IRS and they may make   
+changes to how it is generated from year to year. Also, the groups G and H are defined   
+differently from year to year.
+
+```{r}
+# use rf_sim on test set
+sim_predict <- predict(rf_sim, test) %>% as.data.table()
+names(sim_predict) <- "sim_predict"
+
+inc_predict <- test %>% 
+  dplyr::mutate(inc_predict = ifelse(MA_income_cy > 8000, "pos", "neg")) %>%
+  dplyr::select(inc_predict)
+```
+
+
+# Performance
+
+Performance of the INF Model with the additional adjustments are evaluated here. Also a   
+few different types of confidence intervals are created to get an idea of how precision   
+may vary between letter batches (samples).    
+
+Below is a confusion matrix and related statistics for the test set with the adjustments:
+
+```{r}
+mod_predict <- predict(rf, test, type = "prob")
+
+final_predict <- bind_cols(mod_predict, inc_predict, sim_predict) %>% 
+  mutate(final_predict = ifelse(pos >= cut & 
+                                inc_predict == "pos" & 
+                                sim_predict == "pos", "pos", "neg")) %>%
+  mutate_at("final_predict", funs(as.factor(.)))
+
+final_predict$final_predict <- relevel(final_predict$final_predict, "pos")
+
+
+caret::confusionMatrix(final_predict$final_predict, test$resp)
+```
+  
+## Confidence Intervals 
+
+A confidence interval for precision loosely quantifies the level of confidence that the   
+true value of precision lies in the interval. It attempts to provide insight into what   
+precision of the model would be if we sent everyone a letter and collected the responses.   
+It does this by creating an interval with a specified level of confidence that represents  
+the frequency of possible confidence intervals that contain the true value of precision if  
+we had infinite number of samples.  
+
+I created a few different types of 95% confidence intervals and compared them.  
+
+The bootstrap percentile confidence interval is the most intuitive to understand and is  
+created by taking random samples with replacement from the test set and corresponding  
+predictions and then calculating precision for each sample. This type of sampling is  
+called bootstrapping and it creates a sampling distribution that is usually very similar  
+to sampling from the population. I sometimes refer to bootstrap confidence interval  
+methods as simulation confidence intervals for this reason. In a 95% bootstrap percentile  
+confidence interval the lower bound is the precision value that corresponds with the 2.5  
+percentile and the upper bound is the precision value that corresponds with the 97.5  
+percentile.  
+```{r, cache = TRUE}
+test_sample <- data_frame(final_predict$final_predict, test$resp)
+
+names(test_sample) <- c("pred", "actual")
+
+set.seed(888)
+B <- 100000
+prec_boot <- numeric(B)
+
+ for (i in 1:B) {
+   index <- sample(1:nrow(test_sample), nrow(test_sample), replace = TRUE)
+   test_sample2 <- test_sample[index, ]
+   prec_boot[i] <-  MLmetrics::Precision(test_sample2$actual,
+                                      test_sample2$pred,
+                                      positive = "pos")
+ }
+```
+
+A density plot of the precision values from bootstrapping is shown below. This shows the  
+distribution of the precision values from the 100,000 resamples. The x axis labels contain  
+the minimum, median, and maximum values of precision. It also contains the lower and upper  
+bounds of the 95% confidence interval.  
+```{r}
+min_prec <- round(min(prec_boot),2)
+max_prec <- round(max(prec_boot),2)
+h_prec <- round(quantile(prec_boot, c(0.975)), 2) %>% unname()
+l_prec <- round(quantile(prec_boot, c(0.025)), 2) %>% unname()
+m_prec <- round(quantile(prec_boot, c(0.5)), 2) %>% unname()
+
+prec_df <- data.frame(prec_boot)
+prec_df <- prec_df %>% mutate(ci_95 = ifelse(prec_boot < h_prec &
+                                    prec_boot > l_prec, 1, 0))
+
+prec_df_95 <- prec_df %>% filter(ci_95 == 1)
+
+
+
+ggplot(data = prec_df, aes(x = prec_boot)) +
+  geom_density(color = "black", fill = "grey89")  +
+  geom_density(data = prec_df_95, color = "black", fill = "palegreen1") +
+  annotate("text", x= m_prec, y= 6.8,
+           label = "95%", size = 12, color = 'royalblue4') +
+  scale_x_continuous(breaks=c(min_prec, max_prec, m_prec, h_prec, l_prec)) +
+  labs(title = "Bootstrap Percentile Confidence Interval",
+       x = "Positive Predictive Value",
+       y = "Density") +
+  theme(plot.title = element_text(hjust = .5, size = 16, face = "bold"),
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=14),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+```
+
+I also created a 95% Bias Corrected and Accelerated (BCA) confidence interval. It's  
+another type of bootstrap confidence interval and it has the benefit of being of being  
+range preserving, transformation invariant and second-order accurate. 
+```{r, cache=TRUE, results="hide"}
+Prec <- function(d, i) {
+  d2 <- d[i, ]
+  precision <- MLmetrics::Precision(d2$actual,
+                                      d2$pred,
+                                      positive = "pos")
+  return(precision)
+}
+
+
+boot_prec <- boot::boot(test_sample, Prec, R = 100000)
+boot_prec
+summary(boot_prec)
+bca_95 <- boot.ci(boot.out = boot_prec, conf = 0.95, type = c('bca'))
+
+bca_lower <- as.data.frame(bca_95$bca)$V4
+bca_upper <- as.data.frame(bca_95$bca)$V5
+
+```
+
+The other two types confidence intervals I created used normal approximation and Wilson  
+score.  
+
+The plot below compares the 4 different types of confidence intervals.  
+```{r}
+TP <- test_sample %>% filter(pred == "pos" & actual == "pos") %>% nrow()
+FP <- test_sample %>% filter(pred == "pos" & actual == "neg") %>% nrow()
+
+n <- TP + FP
+p <- TP / (TP+FP)
+# Check if assumption is met for normal approximation
+# n*p
+# n*(1-p)
+
+
+ci <- binom.confint(TP, n, conf.level = .95, 
+                         methods = c("asymptotic", "wilson")) %>% 
+  dplyr::select(method, lower, upper) %>%
+  dplyr::mutate_at("method", funs(as.character(.)))
+
+
+b_ci <- data_frame("method" = c("Percentile", "BCA"), 
+                   'lower' = c(l_prec, bca_lower),
+                   "upper" = c(h_prec, bca_upper))
+
+ci_plot <- b_ci %>% 
+  bind_rows(ci) 
+
+ci_plot$method <- ci_plot$method %>% 
+  stringr::str_replace_all(c("asymptotic", "wilson"), c("Normal", "Wilson"))
+
+ci_plot <- ci_plot %>% melt(id = "method") %>% 
+  dplyr::mutate_at("method", funs(as.factor(.)))
+
+ci_plot$method <- relevel(ci_plot$method, ref = "Percentile")
+
+ggplot(ci_plot, aes(y = method, x = value)) + geom_point() + geom_line() +
+labs(title = "Comparison of Confidence Interval Methods",
+     y = "Method", x = "95% Confidence Interval") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = .5, size = 16, face = "bold"),
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=14)) 
+  
+
+```
+
+
+# 2014 Predictions
+
+The predictor variables for 2014 observations were prepared in a separate file and read  
+into this document in section 7.3. Here I used the INF Model to make predictions on the  
+2014 observations and then made the adjustments to the predictions as previously described  
+in section 7.4. The predictions are saved in a text file and the team will use it to help  
+determine which observations should receive a letter.
+
+```{r}
+mod_pred_14 <- predict(rf, features_14, type = "prob") 
+
+inc_pred_14 <- features_14 %>% 
+  dplyr::mutate(inc_predict = ifelse(MA_income_cy > 8000, "pos", "neg")) %>%
+  dplyr::select(ext_ssn, inc_predict, is_pop_g)
+
+final_pred_14 <- bind_cols(inc_pred_14, mod_pred_14, sim_pred_14) %>% 
+  dplyr::mutate(final_pred =  ifelse(pos >= cut & 
+                              inc_predict == "pos" & 
+                              sim_predict == "pos", "pos", "neg"),
+         pop_group = ifelse(is_pop_g == 1, "G", "H"),
+         ssn = ext_ssn,
+         prediction = final_pred) %>%
+  dplyr::mutate(pos = round(pos, 9)) %>%
+  dplyr::mutate(neg = round(neg, 9)) %>%
+  dplyr::select(ssn, pop_group, pos, neg, prediction) 
+
+#write_tsv(final_pred_14, paste0(data, "INF_V2_14_Predictions.txt"))
+```
+
+The bar chart below shows the number of negative and positive predictions. It also shows  
+the negative predictive value (NPV) and positive predictive value (PPV / precision) from  
+the test set in section 8. This gives an indication of how accurate the negative and  
+positive predictions will be respectively. It's important to remember that the prediction  
+is whether the response of a letter recipient is positive or negative as described in  
+section 3 given that they respond (I'll discuss non-response bias later). Also, I should  
+point out again that a response for a observation can change over time and that the  
+responses used to build the model had 6+ months to be recorded. Therefore the prediction  
+is really what the response would be after 6+ months.
+
+$NPV = \frac{TN}  {TN + FN}$  
+  
+$PPV = \frac{TP}  {TP + FP}$  
+```{r}
+n_pos <- final_pred_14 %>% filter(prediction == "pos") %>% nrow()
+n_neg <- final_pred_14 %>% filter(prediction == "neg") %>% nrow()
+p_pos <- n_pos / (n_pos + n_neg) * 100  
+p_pos <- round(p_pos,digits = 2)
+p_neg <- n_neg / (n_pos + n_neg) * 100
+p_neg <- round(p_neg ,digits = 2)
+pos_info <- paste0(n_pos, " ", "(", p_pos, "%", ")")
+neg_info <- paste0(n_neg, " ", "(", p_neg, "%", ")")
+
+# NPV and PPV from test set
+PPV <- ((TP / (TP + FP)) * 100) %>% round(2)
+PPV_n <- ((PPV / 100) * n_pos) %>% round(0)
+TN <- test_sample %>% filter(pred == "neg" & actual == "neg") %>% nrow()
+FN <- test_sample %>% filter(pred == "neg" & actual == "pos") %>% nrow()
+NPV <- ((TN / (TN + FN)) * 100) %>% round(2)
+NPV_n <- ((NPV / 100) * n_neg) %>% round(0)
+ppv_info <- paste0( PPV, "%")
+npv_info <- paste0(NPV, "%")
+
+
+
+pred_plot <- data.frame("Class" = c("Positive", "Negative", "Positive", "Negative"),
+                        "Type" = c("Prediction", "Prediction", 
+                                   "Predictive Value", "Predictive Value"),
+                        "Count" = c(n_pos, n_neg, PPV_n, NPV_n),
+                        "Text" = c(pos_info, neg_info, ppv_info, npv_info),
+                        "text_cnt" = c(n_pos + 5100, n_neg + 5100, PPV_n, NPV_n))
+
+# important to note here that model predicts the response given a response so 
+# not appropriate to include number of responses from NPV and PPV
+ggplot(data = pred_plot, aes(x = Class, 
+                             y = Count, 
+                             fill = Type, 
+                             color = Type, 
+                             alpha = Type)) +
+  geom_bar(stat = 'identity', position = "identity") +
+  labs(title = "Model Predictions and Expectations") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = .5, size = 16, face = "bold"),
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=14)) +
+  scale_colour_manual(values=c("lightblue4","red")) +
+  scale_fill_manual(values=c("lightblue","pink")) +
+  scale_alpha_manual(values=c(.8, .3)) +
+  geom_text(aes(y = text_cnt, label = Text, vjust= 1.15), show.legend = F, size = 4) 
+
+```
+
+
+# Future Improvements
+
+As described in section 7.4, precision was favored for making the predictions because a   
+bad letter can't be un-sent but a good letter that wasn't sent can be later sent with a  
+the aid of a better model. This is the first iteration of a model to predict having a  tax 
+liability and there is much more room for improvement. I believe the next iteration of the  
+model could have higher precision and a much higher recall. In this section I describe ways  
+that could help improve the model.
+
+## Data Cleaning
+
+Ensuring data accuracy is vital to maximize model performance. I applied the 80/20 rule  
+while cleaning the data so I'm sure this area could be improved. I also believe that it  
+would have a large impact on model performance.  
+
+### Response Variable
+
+The accuracy of the labels (pos/neg) for the response variable is probably the most  
+important piece of data cleaning (IMHO). There is only one response variable but many  
+predictor variables so the noise caused by inaccurate data for a predictor might be  
+drowned out by the many other predictors. However, with a binary response variable any  
+inaccuracies in the label will send very conflicting signals.   
+
+The data I pulled for the response variable is not the most accurate. I mentioned in  
+section 3 the specific table I pulled payments from because that data is also stored in  
+other tables. I found tbltransaction to be the most reliable but difficult to work with.  
+
+The criteria that I designed for being positive or negative isn't perfect as evidenced by  
+the 2 dozen or so observations that are labelled as both positive and negative. Also I  
+filtered out about 1k observations before labeling the rest because the estimated return  
+was reversed by the system without a response from the letter recipient. This was likely  
+because of undeliverable mail but it might also be from system configuration issues.  
+
+The issue with labeling that I believe is the most difficult to fix is letter recipients  
+responding inappropriately. When people don’t have a tax liability but pay anyway, it will  
+add noise to the data. This will make it more difficult for the machine learning algorithm  
+to differentiate between classes. In addition when letter recipients do really have a tax  
+liability but are able to convince a reviewer that they don’t, it will also create noise.  
+There is an inconsistency and bias that stems from the reviewer. There has been research  
+published that proposed methods to identify these mislabeled observations. My preliminary  
+review of the research didn’t find any applicable methods for this context but it should  
+be explored further.  
+
+### Predictor Variables
+
+More accurate data for the predictor variables can also improve model performance,  
+especially the more important predictors. The highest ranked predictors are derived from  
+the IRMF data. For this data I didn’t handle duplicated and amended forms in the most  
+optimal way. Also there are other sources of the same data and it should be used to cross  
+check the accuracy of it. Removing observations that are strange or are outliers could  
+also improve performance.  
+
+The driver’s license data from Genisys seemed to work better because it ranked higher in  
+model variable importance and model performance was better when I used it. For this model  
+I used driver’s license data from DTAX because I didn’t have the 2014 license data from  
+Genisys and the data sources should be consistent from year to year.  
+
+Values of predictors that can change over time should have restrictions to be consistent.  
+For example a predictor for the 2013 observations is whether a MA tax return was filed for  
+the tax year that is 1 year after the target year with 2013 being the target year as of  
+2018 and this is the status 5 years after the target year. However the equivalent  
+predictor for 2014 observations is whether the return was filed as of 2018 which is now  
+4 years after the target year. These types of predictors are inconsistent from year to  
+year.
+
+## Additional Data
+
+Generally models perform better when there is more data. Especially data that is different.  
+There are two ways to add more data. You can either create more predictors or get more  
+observations.
+
+### Additional Observations
+
+The model should be updated when additional responses are recorded. Responses from 2013  
+letters are still coming in and responses from 2014 letters should be used as well after  
+they are sent. Also some of the higher quality responses from the Soft Letters should be  
+used. 
+
+### Additional Predictors
+
+There are a lot of additional predictors that can be created. It would be too lengthy to  
+try to describe them here. 
+
+## Model Types 
+
+Other types of models created using packages like LightGBM may perform better. Also I  
+didn't spend much time tuning model parameters so doing that may also improve performance.  
+In addition, creating ensemble models by stacking different ones has been made much easier  
+with the caretEnsemble package
+
+## Error Analysis
+
+Analyzing the errors that the model makes may reveal systematic trends. These trends may  
+be caused be inaccurate data or it can provide insights for potential predictors. The lime  
+package can help with this as it helps explain how a black box model like RandomForest  
+makes a specific prediction. Also clustering is a useful method for detecting trends.
+
+## Non-Response Bias
+
+Non-response bias is a source of error in the model that happens when the letter  
+recipients that don’t respond are significantly different than those that do respond. I  
+used one group of people (respondents) to make predictions on another group of people  
+(non respondents). This can be a problem if these two groups are different from each  
+other. I’m sure there are ways to detect and correct for this because it is a common  
+concern.
+
+# Summary
+
+This document described how a model was built to ultimately predict which individuals  
+within non – filer groups G and H had a tax liability. The performance of the model was  
+evaluated and if various assumptions are met then we can expect roughly `r l_prec*100` – `r h_prec*100`   
+percent of the responses to the non filer letters that are based on model predictions to  
+end up being positive. The accuracy of the positive predictions (precision) was favored  
+over finding all of the true positives because a bad letter that is sent can’t be unsent  
+but a good letter that isn’t sent can later be sent with the aid of an improved version of  
+the model. I concluded by pointing out different ways to improve the model. 
+
+# References
+
+Normally I would cite is method used and provide references but I didn't do it here to save   
+time. Most of the methods I used are either commonly understood by practitioners or are  
+from the books Applied Predictive Modelling and Elements of Statistical Learning.  
+
+
+
+LoadPackages <- function(packages) {
+  # Load or install packages if they aren't already loaded.
+  #
+  # Args:
+  #   packages: a vector of package names
+  #
+  for (package in packages) {
+    if (!require(package, character.only=T, quietly=T)) {
+      if (!package %in% installed.packages()) install.packages(package)
+      library(package, character.only=T)
+    }
+  }
+}
+
+LoadPackages(c("readr", "dplyr", "readxl"))
+
+FixSsn <- function(df, id) {
+  # Standarize social security numbers
+  #
+  # Args:
+  # df: Data frame that contains a column for SSNs
+  # id: The SSN column
+  #
+  # Returns a df with a new column of standarized SSNs
+  df <- df %>% mutate(SSN = gsub("-", "",  id))
+  df <- df %>% mutate(SSN = gsub("/", "",  SSN))
+  df <- df %>% mutate(SSN = gsub(" ", "",  SSN))
+  df <- df %>% mutate(SSN = gsub("\\.0$", "",  SSN))
+  # some ssn is 12345678.0 so replace the .0 with empty space
+  df <- df %>% mutate(SSN = ifelse(nchar(SSN) < 9, paste0(0,SSN), SSN))
+  df <- df %>% mutate(SSN = ifelse(nchar(SSN) < 9, paste0(0,SSN), SSN))
+  df <- df %>% select(SSN, everything())
+  ifelse(nchar(df$SSN) == 9, print("ssn is 9 digits long"), 
+         print("some ssn are not 9 digit long"))
+  return(df)
+}
+
+ZeroVarCols <- function(df) {
+  # Column names that have zero variance. (NA counts as unique value)
+  #
+  # Args:
+  # df: data frame 
+  #
+  # Returns:
+  #  vector of column names with zero variance 
+  colname.vec <- c()
+  for(col in names(df)) {
+    x <- df[ ,col]
+    len <- nrow((unique(x)))
+    if(len == 1 ) {
+      colname.vec <- c(colname.vec, col)
+    }
+  }
+  return(colname.vec)
+}
+
+CompareDf <- function(df1, df2) {
+  # Compares if two df are the same
+  #
+  # Args:
+  # df1: first data frame to compare
+  # df2: first data frame to compare
+  #
+  # Returns:
+  #  Data frame showing each column name and whether or not they are the same
+  comparison <- compare::compare(df1,df2)
+  comparison_df <- data.frame(comparison$detailedResult)
+  rnames <- data.frame(rownames(comparison_df))
+  comparison_df <- bind_cols(rnames,comparison_df)
+  colnames(comparison_df) <- c('Column_Name', 'Comparison')
+  return(comparison_df)
+}
+
+ColOnlyContains <- function(df, strings) {
+  # Return column names that only contain certain values
+  #
+  # Args:
+  # df: data frame
+  # strings: vector of string(s) (ex. c("string1", "string2"))
+  #
+  # Returns:
+  #  Vector of Column names that only contain certain values (has to contain all of them)
+  df <- as_tibble(df)
+  colNames <- c()
+  lenStr <- length(strings)
+  strings <- stringr::str_to_upper(strings)
+  for (col in names(df)) {
+    unqValues <- c(unique(df[, col]))
+    unqValues <- unqValues[[1]]
+    unqValues <- stringr::str_to_upper(unqValues)
+    unqValues <- setdiff(unqValues, NA)
+    lenUnqValues <- length(unqValues)
+    if(sum(unqValues %in% strings) ==  lenStr & lenUnqValues == lenStr ) {
+      colNames <- c(colNames, col)
+    }
+  }
+  return(colNames)
+}
+
+ColMatchString <- function(df, strings) {
+  # Return column names that match one or more of the strings
+  #
+  # Args:
+  # df: data frame
+  # strings: vector of string(s) (ex. c("string1", "string2"))
+  #
+  # Returns:
+  #  Vector of Column names that matches one or more ofthe strings
+  df <- tbl_df(df)
+  colname_vec <- c()
+  strings <- stringr::str_to_upper(strings)
+  for (col in names(df)) {
+    colName <- stringr::str_to_upper(names(df[,col]))
+    if (sum(stringr::str_detect(colName, strings)) > 0 )  {
+      colname_vec <- c(colname_vec, col)
+    }
+  }
+  return(colname_vec)
+}
+
+IdCols <- function(df) {
+  # Return columns that is unique for each observation and ignore NAs.
+  #
+  # Args:
+  # df: data frame 
+  #
+  # Returns:
+  #  vector of column names that are unique for each observation
+  v <- c()
+  j <- 1
+  for(i in 1:ncol(df)) {
+    x <- df[ ,i]
+    x <- x[!is.na(x),]
+    len <- nrow(x)
+    x <- x[!duplicated(x), ]
+    unq <- nrow(x)
+    if(unq == len ) {
+      v[j] <- colnames(df[ ,i])
+      j <- j+1
+    }
+  }
+  return(v)
+}
+
+IdCols2 <- function(df) {
+  # Return columns that is unique for each observation and does not ignore NAs
+  #
+  # Args:
+  # df: data frame 
+  #
+  # Returns:
+  #  vector of column names that are unique for each observation 
+  out <- lapply(df, function(x) length(unique(x)))
+  want <- which((out == nrow(df)))
+  unlist(want)  
+}
+
+ColNa <- function(df) {
+  # Return a vector of column names that have NA values
+  #
+  # Args:
+  # df: data frame 
+  #
+  # Returns:
+  #  vector of column names that have NAs 
+  df <- tbl_df(df)
+  v <- c()
+  j <- 1
+  for(i in 1:ncol(df)) {
+    x <- df[ ,i]
+    xRmvNA <- x[!is.na(x),]
+    lenx <- nrow(x)
+    lenxRmvNA <- nrow(xRmvNA)
+    if(lenx != lenxRmvNA ) {
+      v[j] <- colnames(df[ ,i])
+      j <- j+1
+    }
+  }
+  return(v)
+}
+
+
+ColNaNotAll <- function(df) {
+  # Find column names that have NA values but they are not all NA values
+  #
+  # Args:
+  # df: data frame 
+  #
+  # Returns:
+  #  vector of column names that have NAs but not all NAs 
+  df <- tbl_df(df)
+  v <- c()
+  j <- 1
+  for(i in 1:ncol(df)) {
+    x <- df[ ,i]
+    xRmvNA <- x[!is.na(x),]
+    lenx <- nrow(x)
+    lenxRmvNA <- nrow(xRmvNA)
+    if(lenx != lenxRmvNA &  lenxRmvNA > 0) {
+      v[j] <- colnames(df[ ,i])
+      j <- j+1
+    }
+  }
+  return(v)
+}
+
+
+ColNaAllNa <- function(df) {
+  # Find column names that have all NAs
+  #
+  # Args:
+  # df: data frame 
+  #
+  # Returns:
+  #  Vector of Column names that have all NAs
+  df <- tbl_df(df)
+  v <- c()
+  j <- 1
+  for(i in 1:ncol(df)) {
+    x <- df[ ,i]
+    xRmvNA <- x[!is.na(x),]
+    lenx <- nrow(x)
+    lenxRmvNA <- nrow(xRmvNA)
+    if(lenx != lenxRmvNA &  lenxRmvNA == 0) {
+      v[j] <- colnames(df[ ,i])
+      j <- j+1
+    }
+  }
+  return(v)
+}
+
+# ex. cutoffs(glmnet, eval, eval$overall_response, 400,700, 1000) 
+cutoffs <- function(model, test_set, response, low, high, divisor) {
+  pred <- predict(model, test_set, type = "prob")
+  cutoff <- low
+  j <- 1
+  metrics_cutoffs <- data.frame()
+  for(i in low:high){
+    cut <- cutoff / divisor
+    
+    colname <- paste0("cut",cut)
+    pred[[colname]] <- ifelse(pred$pos > cut, "pos","neg")
+    pred[[colname]] <- factor(pred[[colname]])
+    pred[[colname]] <- relevel(pred[[colname]], "pos")
+    cutoff <- cutoff +1
+    
+    cm <- caret::confusionMatrix(pred[[colname]], response, positive = "pos")
+    metrics_cutoffs[j,1] <- cut
+    metrics_cutoffs[j,2] <- cm$overall[1]
+    metrics_cutoffs[j,3] <- cm$overall[2]
+    metrics_cutoffs[j,4] <- cm$byClass[5]
+    metrics_cutoffs[j,5] <- cm$byClass[6]
+    metrics_cutoffs[j,6] <- cm$byClass[2]
+    colnames(metrics_cutoffs) = c('Prob_Cutoff', 'Accuracy', "Kappa", 
+                                  "Precision", "Recall", "Specificity")
+    j <- j+1
+  }
+  mets_pred <-  list(metrics_cutoffs,pred)
+  return(mets_pred)
+}
+
+customSummary <- function (data, lev = NULL, model = NULL) 
+{
+  lvls <- levels(data$obs)
+  if (length(lvls) > 2) 
+    stop(paste("Your outcome has", length(lvls), "levels. The classSummary() function isn't appropriate."))
+  if (!all(levels(data[, "pred"]) == lvls)) 
+    stop("levels of observed and predicted data do not match")
+  data$y = as.numeric(data$obs == lvls[2])
+  prAUC <- MLmetrics::PRAUC(y_pred = data[, lev[1]], y_true = ifelse(data$obs == lev[1], 1, 0))
+  rocAUC <- ModelMetrics::auc(ifelse(data$obs == lev[2], 0,1), data[, lvls[1]])
+  out <- c(prAUC, rocAUC, 
+           caret::sensitivity(data[, "pred"], data[, "obs"], lev[1]), 
+           caret::specificity(data[, "pred"], data[, "obs"], lev[2]),
+           caret::precision(data = data$pred, reference = data$obs, relevant = lev[1]),
+           caret::F_meas(data = data$pred, reference = data$obs, relevant = lev[1]))
+  names(out) <- c("PR-AUC", "ROC-AUC", "Sens/Rec", "Spec", "Prec", "F")
+  out
+}
+
+eightSummary <- function(...) c(customSummary(...), defaultSummary(...))
+
+ConvertFormPayeeState <- function(grouped_df, tax_years, base_names, sep_state, cols) {
+  i <- 2
+  df_list <- list(grouped_df %>% distinct(ext_ssn))
+  
+  for(year in tax_years) {
+    df_year <- grouped_df %>% filter(fdtmFilingPeriod == year)
+    
+    for(state in sep_state) {
+      df_state <- df_year %>%
+        filter(fstrPayeeState == state) %>%
+        select(cols)
+      new_names <- paste(state, 
+                         str_replace(year, "\\d{2}(\\d{2}).+", "\\1"),
+                         base_names, 
+                         sep = "_")
+      names(df_state) <- c('ext_ssn', new_names)
+      df_list[[i]] <- df_state
+      i <- i + 1
+    }
+  }
+  joined_df <- plyr::join_all(df_list, by = 
+                                c("ext_ssn" = "ext_ssn"), type = "left")
+  return(joined_df)   
+}
+
+ConvertFormPayee <- function(grouped_df, tax_years, base_names, cols, name) {
+  i <- 2
+  df_list <- list(grouped_df %>% distinct(ext_ssn))
+  
+  for(year in tax_years) {
+    df <- grouped_df %>%
+      filter(fdtmFilingPeriod == year) %>% 
+      select(cols)
+    new_names <- paste(name, 
+                       str_replace(year, "\\d{2}(\\d{2}).+", "\\1"),
+                       base_names, 
+                       sep = "_")
+    names(df) <- c('ext_ssn', new_names)
+    
+    df_list[[i]] <- df 
+    i <- i + 1
+  }
+  joined_df <- plyr::join_all(df_list, by = 
+                                c("ext_ssn" = "ext_ssn"), type = "left")
+  return(joined_df)
+}
+
+ConvertFormPayeeState2 <- function(form_df, tax_years,  col_names, sep_state, form_type) {
+  
+  grouped_state <- form_df %>%
+    group_by(ext_ssn, fdtmFilingPeriod, fstrPayeeState) %>%
+    summarise(sum(get(col_names[1])),
+              sum(get(col_names[2])),
+              count = n()) %>%
+    ungroup()
+  
+  df_list <- list(grouped_state %>% distinct(ext_ssn))
+  i <- 2
+  
+  for(year in tax_years) {
+    
+    df_year <- grouped_state %>% filter(fdtmFilingPeriod == year)
+    
+    for(state in sep_state) {
+      df_state <- df_year %>%
+        filter(fstrPayeeState == state) %>%
+        select(-fdtmFilingPeriod, -fstrPayeeState)
+      
+      new_names <- paste(form_type,
+                         state, 
+                         str_replace(year, "\\d{2}(\\d{2}).+", "\\1"),
+                         c(col_names, "count"), 
+                         sep = "_")
+      names(df_state) <- c('ext_ssn', new_names)
+      
+      df_list[[i]] <- df_state
+      i <- i + 1
+    }
+  }
+  
+  joined_df <- plyr::join_all(df_list, by = 
+                                c("ext_ssn" = "ext_ssn"), type = "left")
+  return(joined_df)
+}
+
+
+ConvertFormPayee3 <- function(form_df, tax_years,  col_names, sep_state, no_tax_state, form_type) {
+  
+  grouped_other_1099int <- irmf_1099int %>%
+    filter(!(fstrPayeeState %in% sep_state)) %>%
+    group_by(ext_ssn, fdtmFilingPeriod) %>% 
+    summarise(sum_witheld = sum(fcurTaxWithheld), 
+              sum_interest = sum(fcurInterest), count = n()) %>%
+    ungroup()
+  
+  grouped_no_tax_1099int <- irmf_1099int %>%
+    filter(fstrPayeeState %in% no_tax_state) %>%
+    group_by(ext_ssn, fdtmFilingPeriod) %>% 
+    summarise(sum_witheld = sum(fcurTaxWithheld), 
+              sum_interest = sum(fcurInterest), count = n()) %>%
+    ungroup()
+  
+  grouped_not_ma_1099int <- irmf_1099int %>%
+    filter(fstrPayeeState != "MA") %>%
+    group_by(ext_ssn, fdtmFilingPeriod) %>% 
+    summarise(sum_witheld = sum(fcurTaxWithheld), 
+              sum_interest = sum(fcurInterest), count = n()) %>%
+    ungroup()
+  
+  grouped_year_1099int <- irmf_1099int %>% 
+    group_by(ext_ssn, fdtmFilingPeriod) %>% 
+    summarise(sum_witheld = sum(fcurTaxWithheld), 
+              sum_interest = sum(fcurInterest), count = n()) %>%
+    ungroup()
+  
+  grouped_df_list <- list(grouped_other_1099int, grouped_no_tax_1099int, 
+                          grouped_not_ma_1099int, grouped_year_1099int)
+  
+  
+  df_list <- list(form_df %>% distinct(ext_ssn))
+  i <- 2
+  group_types <- c("other", "noTax", "notMA", "total")
+  j <- 1
+  
+  for(grouped_df in grouped_df_list) {
+    
+    for(year in tax_years) {
+      df <- grouped_df %>%
+        filter(fdtmFilingPeriod == year) %>% 
+        select(-fdtmFilingPeriod)
+      new_names <- paste(form_type,
+                         group_types[j], 
+                         str_replace(year, "\\d{2}(\\d{2}).+", "\\1"),
+                         c(col_names, "count"), 
+                         sep = "_")
+      names(df) <- c('ext_ssn', new_names)
+      
+      df_list[[i]] <- df 
+      i <- i + 1
+    }
+    j <- j + 1
+  }
+  
+  
+  
+  
+  joined_df <- plyr::join_all(df_list, by = 
+                                c("ext_ssn" = "ext_ssn"), type = "left")
+  return(joined_df)
+}
+
+
+ConvertFormPayee4 <- function(form_df, tax_years,  col_names, sep_state, no_tax_state, form_type) {
+  # Convert form data from long to super wide by slicing it up in diff. ways
+  #
+  # Args:
+  #  form_df: data frame of long form data (ex. IRMFint), see queries in raw2 folder
+  #  tax_years: a vector of tax years in df ex(c("2012-12-31" "2013-12-31" "2014-12-31"))
+  #  col_names: cols that are summed up in the groupings (ex. "fcurTaxWithheld" "fcurInterest")
+  #  sep_state: vector of states that you want sep cols for (ex. "NY", "MA")
+  #  no_tax_state: vector of states with no icm tax (ex. "NH", "FL")
+  #  form_type: a string for form type to be appended to col names ex.(IRMFint)
+  #
+  # Returns a df of possible predictors
+  # TODO: if you need to add more cols to be summed use an if statement and boolean argument or count argument
+  
+  # cast cols as double and remove time stamp
+  form_df <- form_df %>%
+    mutate_at(col_names, funs(as.double(.))) %>%
+    mutate(fdtmFilingPeriod = 
+             str_replace(form_df$fdtmFilingPeriod, "(\\d{4}-\\d{2}-\\d{2}).+", "\\1"))
+  
+  # group by ssn, period and payee state
+  if(length(col_names) == 2){
+    
+    grouped_state <- form_df %>%
+      group_by(ext_ssn, fdtmFilingPeriod, fstrPayeeState) %>%
+      summarise(sum(get(col_names[1])),
+                sum(get(col_names[2])),
+                count = n()) %>%
+      ungroup()
+    
+  }
+  
+  if(length(col_names) == 3){
+    
+    grouped_state <- form_df %>%
+      group_by(ext_ssn, fdtmFilingPeriod, fstrPayeeState) %>%
+      summarise(sum(get(col_names[1])),
+                sum(get(col_names[2])),
+                sum(get(col_names[3])),
+                count = n()) %>%
+      ungroup()
+    
+  }
+  
+  # initialize list with df of unique ssns
+  df_list <- list(grouped_state %>% distinct(ext_ssn))
+  i <- 2
+  
+  # create df for each year separate state and year
+  for(year in tax_years) {
+    
+    df_year <- grouped_state %>% filter(fdtmFilingPeriod == year)
+    
+    for(state in sep_state) {
+      df_state <- df_year %>%
+        filter(fstrPayeeState == state) %>%
+        select(-fdtmFilingPeriod, -fstrPayeeState)
+      
+      new_names <- paste(form_type,
+                         state, 
+                         str_replace(year, "\\d{2}(\\d{2}).+", "\\1"),
+                         c(col_names, "count"), 
+                         sep = "_")
+      names(df_state) <- c('ext_ssn', new_names)
+      
+      df_list[[i]] <- df_state
+      i <- i + 1
+    }
+  }
+  
+  # Create dfs that has specific filter and then group by ssn and year
+  # add dfs to a list 
+  
+  if(length(col_names) == 2){
+    
+    grouped_other_1099int <- form_df %>%
+      filter(!(fstrPayeeState %in% sep_state)) %>%
+      group_by(ext_ssn, fdtmFilingPeriod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])), 
+                count = n()) %>%
+      ungroup()
+    
+    grouped_no_tax_1099int <- form_df %>%
+      filter(fstrPayeeState %in% no_tax_state) %>%
+      group_by(ext_ssn, fdtmFilingPeriod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])), 
+                count = n()) %>%
+      ungroup()
+    
+    grouped_not_ma_1099int <- form_df %>%
+      filter(fstrPayeeState != "MA") %>%
+      group_by(ext_ssn, fdtmFilingPeriod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])), 
+                count = n()) %>%
+      ungroup()
+    
+    grouped_year_1099int <- form_df %>% 
+      group_by(ext_ssn, fdtmFilingPeriod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])), 
+                count = n()) %>%
+      ungroup()
+    
+  }
+  
+  if(length(col_names) == 3){
+    
+    grouped_other_1099int <- form_df %>%
+      filter(!(fstrPayeeState %in% sep_state)) %>%
+      group_by(ext_ssn, fdtmFilingPeriod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])),
+                sum(get(col_names[3])),
+                count = n()) %>%
+      ungroup()
+    
+    grouped_no_tax_1099int <- form_df %>%
+      filter(fstrPayeeState %in% no_tax_state) %>%
+      group_by(ext_ssn, fdtmFilingPeriod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])),
+                sum(get(col_names[3])),
+                count = n()) %>%
+      ungroup()
+    
+    grouped_not_ma_1099int <- form_df %>%
+      filter(fstrPayeeState != "MA") %>%
+      group_by(ext_ssn, fdtmFilingPeriod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])),
+                sum(get(col_names[3])),
+                count = n()) %>%
+      ungroup()
+    
+    grouped_year_1099int <- form_df %>% 
+      group_by(ext_ssn, fdtmFilingPeriod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])),
+                sum(get(col_names[3])),
+                count = n()) %>%
+      ungroup()
+    
+  }
+  
+  grouped_df_list <- list(grouped_other_1099int, grouped_no_tax_1099int, 
+                          grouped_not_ma_1099int, grouped_year_1099int)
+  
+  # names of type of groupings to be used for col names
+  group_types <- c("other", "noTax", "notMA", "total")
+  j <- 1
+  
+  # create dfs for the diff grouped dfs 
+  for(grouped_df in grouped_df_list) {
+    
+    for(year in tax_years) {
+      df <- grouped_df %>%
+        filter(fdtmFilingPeriod == year) %>% 
+        select(-fdtmFilingPeriod)
+      new_names <- paste(form_type,
+                         group_types[j], 
+                         str_replace(year, "\\d{2}(\\d{2}).+", "\\1"),
+                         c(col_names, "count"), 
+                         sep = "_")
+      names(df) <- c('ext_ssn', new_names)
+      
+      df_list[[i]] <- df 
+      i <- i + 1
+    }
+    j <- j + 1
+  }
+  
+  # join all the dfs in the list  
+  joined_df <- plyr::join_all(df_list, by = 
+                                c("ext_ssn" = "ext_ssn"), type = "left")
+  
+  return(joined_df)
+}
+
+
+
+ConvertFormPayee5 <- function(form_df, col_names, form_type) {
+  # Convert form data from long to super wide by slicing it up in diff. ways
+  # This one doesn't loop thru indivdual states so not super duper wide
+  #
+  # Args:
+  #  form_df: data frame of long form data (ex. IRMFint), see queries in raw2 folder
+  #  col_names: cols that are summed up in the groupings (ex. "fcurTaxWithheld" "fcurInterest")
+  #  form_type: a string for form type to be appended to col names ex.(IRMFint)
+  #
+  # Returns a df of possible predictors
+  # TODO: optimize using tidy eval
+  
+  # cast cols as double and remove time stamp
+  form_df <- form_df %>%
+    mutate_at(col_names, funs(as.double(.))) %>%
+    mutate(fdtmfilingperiod = 
+             str_replace(form_df$fdtmfilingperiod, "(\\d{4}-\\d{2}-\\d{2}).+", "\\1"))
+  
+  # create some vectors for later use
+  no_tax_state <- c("FL", "NH", "AK", "NV", "SD", "TX", "WA", "WY", "TN")
+  tax_years <- form_df %>% distinct(fdtmfilingperiod) %>% pull(fdtmfilingperiod)
+  sep_state <- c("NY", "CA", "CT", "NJ", "PA", "VA")
+  
+  # Create dfs that has specific filter and then group by ssn and year
+  # add dfs to a list 
+  
+  if(length(col_names) == 2){
+    
+    grouped_otherState_1099int <- form_df %>%
+      filter(!(fstrpayeestate %in% c('MA', sep_state, no_tax_state))) %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])), 
+                count = n()) %>%
+      ungroup()
+    
+    grouped_sepState_1099int <- form_df %>%
+      filter(fstrpayeestate %in% sep_state) %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])), 
+                count = n()) %>%
+      ungroup()    
+    
+    
+    grouped_no_tax_1099int <- form_df %>%
+      filter(fstrpayeestate %in% no_tax_state) %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])), 
+                count = n()) %>%
+      ungroup()
+    
+    grouped_not_ma_1099int <- form_df %>%
+      filter(fstrpayeestate != "MA") %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])), 
+                count = n()) %>%
+      ungroup()
+    
+    grouped_is_ma_1099int <- form_df %>%
+      filter(fstrpayeestate == "MA") %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])),
+                count = n()) %>%
+      ungroup()     
+    
+    grouped_year_1099int <- form_df %>% 
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])), 
+                count = n()) %>%
+      ungroup()
+    
+  }
+  
+  if(length(col_names) == 3){
+    
+    grouped_otherState_1099int <- form_df %>%
+      filter(!(fstrpayeestate %in% c('MA', no_tax_state))) %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])),
+                sum(get(col_names[3])),
+                count = n()) %>%
+      ungroup()
+    
+    grouped_sepState_1099int <- form_df %>%
+      filter(fstrpayeestate %in% sep_state) %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])),
+                sum(get(col_names[3])),
+                count = n()) %>%
+      ungroup()      
+    
+    grouped_no_tax_1099int <- form_df %>%
+      filter(fstrpayeestate %in% no_tax_state) %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])),
+                sum(get(col_names[3])),
+                count = n()) %>%
+      ungroup()
+    
+    grouped_not_ma_1099int <- form_df %>%
+      filter(fstrpayeestate != "MA") %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])),
+                sum(get(col_names[3])),
+                count = n()) %>%
+      ungroup()
+    
+    grouped_is_ma_1099int <- form_df %>%
+      filter(fstrpayeestate == "MA") %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])),
+                sum(get(col_names[3])),
+                count = n()) %>%
+      ungroup()    
+    
+    grouped_year_1099int <- form_df %>% 
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise(sum(get(col_names[1])), 
+                sum(get(col_names[2])),
+                sum(get(col_names[3])),
+                count = n()) %>%
+      ungroup()
+    
+  }
+  
+  grouped_df_list <- list(grouped_otherState_1099int,
+                          grouped_sepState_1099int, 
+                          grouped_no_tax_1099int, 
+                          grouped_not_ma_1099int, 
+                          grouped_is_ma_1099int, 
+                          grouped_year_1099int)
+  
+  # initialize list with df of unique ssns
+  list_length <- length(grouped_df_list)  * length(tax_years) +1
+  df_list <- vector(mode = "list", length = list_length)
+  df_list[[1]] <- form_df %>% distinct(ext_ssn)
+  i <- 2
+  
+  # names of type of groupings to be used for col names
+  group_types <- c('otherState', 'sepState', "noTax", "notMA", "isMA", "total")
+  j <- 1
+  
+  # create dfs for the different grouped dfs 
+  for(grouped_df in grouped_df_list) {
+    
+    for(year in tax_years) {
+      df <- grouped_df %>%
+        filter(fdtmfilingperiod == year) %>% 
+        select(-fdtmfilingperiod)
+      new_names <- paste(form_type,
+                         group_types[j], 
+                         str_replace(year, "\\d{2}(\\d{2}).+", "\\1"),
+                         c(col_names, "count"), 
+                         sep = "_")
+      names(df) <- c('ext_ssn', new_names)
+      df_list[[i]] <- df 
+      i <- i + 1
+    }
+    j <- j + 1
+  }  
+  
+  # join all the dfs in the list  
+  joined_df <- plyr::join_all(df_list, by = 
+                                c("ext_ssn" = "ext_ssn"), type = "left")
+  
+  return(joined_df)
+}
+
+#this version runs about 30 seconds faster
+ConvertFormPayee6 <- function(form_df, col_names, form_type) {
+  # Convert form data from long to super wide by slicing it up in diff. ways
+  # This one doesn't loop thru indivdual states so not super duper wide
+  #
+  # Args:
+  #  form_df: data frame of long form data (ex. IRMFint), see queries in raw2 folder
+  #  col_names: cols that are summed up in the groupings (ex. "fcurTaxWithheld" "fcurInterest")
+  #  form_type: a string for form type to be appended to col names ex.(IRMFint)
+  #
+  # Returns a df of possible predictors
+  # Note: intentianally did not break this fucntion up to separate shorter functions
+  #       counts don't include forms that have zeros in relevant cols (maybe shouldn't do this)
+  
+  # For these forms, the payer state might be relavent. update this when you find
+  # other forms where payer state is relevant
+  payer_forms <- c("IRMFg", "IRMFm", "IRMFw2g", "IRMFw2", "IRMF1098", "IRMFk1")
+  
+  # cast cols as double and remove time stamp
+  form_df <- form_df %>%
+    mutate_at(col_names, funs(as.double(.))) %>%
+    mutate(fdtmfilingperiod = 
+             str_replace(form_df$fdtmfilingperiod, "(\\d{4}-\\d{2}-\\d{2}).+", "\\1"))
+  
+  # filter out forms that have zeros for relanvat columns
+  form_df["amount"] <- 0
+  
+  for(col in col_names) {
+    form_df["amount"] <- form_df['amount'] + form_df[col]
+  }
+  
+  form_df <- form_df %>% filter(amount > 0)
+  
+  # create some vectors for later use
+  no_tax_state <- c("FL", "NH", "AK", "NV", "SD", "TX", "WA", "WY", "TN")
+  tax_years <- form_df %>% 
+    distinct(fdtmfilingperiod) %>% 
+    arrange(fdtmfilingperiod) %>% 
+    pull(fdtmfilingperiod) 
+  sep_state <- c("NY", "CA", "CT", "NJ", "PA", "VA")
+  
+  # Create dfs that has specific filter and then group by ssn and year
+  # add dfs to a list 
+  
+  # other states
+  count_other <- form_df %>%
+    filter(!(fstrpayeestate %in% c('MA', sep_state, no_tax_state))) %>%
+    group_by(ext_ssn, fdtmfilingperiod) %>% 
+    summarise(count = n()) %>%
+    ungroup()
+  
+  grouped_otherState <- form_df %>%
+    filter(!(fstrpayeestate %in% c('MA', sep_state, no_tax_state))) %>%
+    group_by(ext_ssn, fdtmfilingperiod) %>% 
+    summarise_at(col_names, funs(sum)) %>%
+    ungroup() %>%
+    bind_cols(count_other %>% select(count))
+  
+  # separate sate
+  count_sepState <- form_df %>%
+    filter(fstrpayeestate %in% sep_state) %>%
+    group_by(ext_ssn, fdtmfilingperiod) %>%
+    summarise(count = n()) %>%
+    ungroup()
+  
+  grouped_sepState <- form_df %>%
+    filter(fstrpayeestate %in% sep_state) %>%
+    group_by(ext_ssn, fdtmfilingperiod) %>% 
+    summarise_at(col_names, funs(sum)) %>%
+    ungroup() %>%
+    bind_cols(count_sepState %>% select(count))   
+  
+  # no tax state
+  count_noTaxState <-  form_df %>%
+    filter(fstrpayeestate %in% no_tax_state) %>%
+    group_by(ext_ssn, fdtmfilingperiod) %>% 
+    summarise(count = n()) %>%
+    ungroup()
+  
+  grouped_noTax <- form_df %>%
+    filter(fstrpayeestate %in% no_tax_state) %>%
+    group_by(ext_ssn, fdtmfilingperiod) %>% 
+    summarise_at(col_names, funs(sum)) %>%
+    ungroup() %>%
+    bind_cols(count_noTaxState %>% select(count)) 
+  
+  # not ma state
+  count_notMA <- form_df %>%
+    filter(fstrpayeestate != "MA") %>%
+    group_by(ext_ssn, fdtmfilingperiod) %>% 
+    summarise(count = n()) %>%
+    ungroup()
+  
+  grouped_notMa <- form_df %>%
+    filter(fstrpayeestate != "MA") %>%
+    group_by(ext_ssn, fdtmfilingperiod) %>% 
+    summarise_at(col_names, funs(sum)) %>%
+    ungroup() %>%
+    bind_cols(count_notMA %>% select(count))
+  
+  # is ma state
+  count_isMA <- form_df %>%
+    filter(fstrpayeestate == "MA") %>%
+    group_by(ext_ssn, fdtmfilingperiod) %>%
+    summarise(count = n()) %>%
+    ungroup()
+  
+  grouped_isMa <- form_df %>%
+    filter(fstrpayeestate == "MA") %>%
+    group_by(ext_ssn, fdtmfilingperiod) %>% 
+    summarise_at(col_names, funs(sum)) %>%
+    ungroup() %>%
+    bind_cols(count_isMA %>% select(count))
+  
+  # total
+  count_total <- form_df %>% 
+    group_by(ext_ssn, fdtmfilingperiod) %>% 
+    summarise(count = n()) %>%
+    ungroup()
+  
+  grouped_year <- form_df %>% 
+    group_by(ext_ssn, fdtmfilingperiod) %>% 
+    summarise_at(col_names, funs(sum)) %>%
+    ungroup() %>%
+    bind_cols(count_total %>% select(count))
+  
+  # if its a specific type of form then add this payer stuff too
+  if(sum(str_detect(payer_forms, form_type)) > 0 ) {
+    
+    # is ma state payee or payer
+    count_Ma_payeeOrPayer <- form_df %>%
+      filter(fstrpayeestate == "MA" | fstrpayerstate == "MA") %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise(count = n()) %>%
+      ungroup()
+    
+    grouped_Ma_payeeOrPayer <- form_df %>%
+      filter(fstrpayeestate == "MA" | fstrpayerstate == "MA") %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>% 
+      summarise_at(col_names, funs(sum)) %>%
+      ungroup() %>%
+      bind_cols(count_Ma_payeeOrPayer %>% select(count))
+    
+    # Payee and Payer is not MA
+    count_notMa_payeeAndPayer <- form_df %>% 
+      filter(fstrpayeestate != "MA" & fstrpayerstate != "MA") %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>%
+      summarise(count = n()) %>%
+      ungroup()
+    
+    grouped_notMa_payeeAndPayer <- form_df %>%
+      filter(fstrpayeestate != "MA" & fstrpayerstate != "MA") %>%
+      group_by(ext_ssn, fdtmfilingperiod) %>%
+      summarise_at(col_names, funs(sum)) %>%
+      ungroup() %>%
+      bind_cols(count_notMa_payeeAndPayer %>% select(count))
+  }
+  
+  if(sum(str_detect(payer_forms, form_type)) > 0 ) {
+    grouped_df_list <- list(grouped_otherState,
+                            grouped_sepState, 
+                            grouped_noTax, 
+                            grouped_notMa, 
+                            grouped_isMa, 
+                            grouped_year,
+                            grouped_Ma_payeeOrPayer,
+                            grouped_notMa_payeeAndPayer)
+    
+    # names of type of groupings to be used for col names
+    group_types <- c('otherState', 'sepState', "noTax", "notMA",
+                     "isMA", "total", "isMaPayeeOrPayer",  "notMaPayeeAndPayer")
+  } else {
+    grouped_df_list <- list(grouped_otherState,
+                            grouped_sepState, 
+                            grouped_noTax, 
+                            grouped_notMa, 
+                            grouped_isMa, 
+                            grouped_year)
+    
+    # names of type of groupings to be used for col names
+    group_types <- c('otherState', 'sepState', "noTax", 
+                     "notMA", "isMA", "total")
+  }
+  
+  j <- 1
+  
+  # initialize list with df of unique ssns
+  list_length <- length(grouped_df_list)  * length(tax_years) +1
+  df_list <- vector(mode = "list", length = list_length)
+  df_list[[1]] <- form_df %>% distinct(ext_ssn)
+  i <- 2
+  
+  # create dfs for the different grouped dfs 
+  for(grouped_df in grouped_df_list) {
+    
+    for(year in tax_years) {
+      df <- grouped_df %>%
+        filter(fdtmfilingperiod == year) %>% 
+        select(-fdtmfilingperiod)
+      new_names <- paste(form_type,
+                         group_types[j], 
+                         str_replace(year, "\\d{2}(\\d{2}).+", "\\1"),
+                         c(col_names, "count"), 
+                         sep = "_")
+      names(df) <- c('ext_ssn', new_names)
+      df_list[[i]] <- df 
+      i <- i + 1
+    }
+    j <- j + 1
+  }  
+  
+  # join all the dfs in the list  
+  joined_df <- plyr::join_all(df_list, by = 
+                                c("ext_ssn" = "ext_ssn"), type = "left")
+  
+  return(joined_df)
+}
+
+
+ConvertFormPayee7 <- function(form_df, col_names, form_type) {
+  
+  
+  form_df <- form_df %>%
+    mutate(fdtmfilingperiod = 
+             str_replace(form_df$fdtmfilingperiod, 
+                         "(\\d{4}-\\d{2}-\\d{2}).+", "\\1")) %>%
+    mutate_at(col_names, funs(as.double))
+  
+  tax_years <- form_df %>% 
+    distinct(fdtmfilingperiod) %>% 
+    arrange(fdtmfilingperiod) %>% 
+    pull(fdtmfilingperiod)
+  
+  form_df <- form_df %>% 
+    group_by(ext_ssn, fdtmfilingperiod) %>%
+    summarise_at(col_names, funs(sum)) %>%
+    ungroup()
+  
+  df_list <- list()
+  df_list[[1]] <- form_df %>% distinct(ext_ssn)
+  i <- 2
+  j <- 1
+  
+  for(year in tax_years) {
+    df <- form_df %>%
+      filter(fdtmfilingperiod == year) %>% 
+      select(-fdtmfilingperiod)
+    new_names <- paste(form_type,
+                       
+                       str_replace(year, "\\d{2}(\\d{2}).+", "\\1"),
+                       col_names, 
+                       sep = "_")
+    names(df) <- c('ext_ssn', new_names)
+    df_list[[i]] <- df 
+    i <- i + 1
+    j <- j+ 1
+  }
+  
+  joined_df <- plyr::join_all(df_list, by = 
+                                c("ext_ssn" = "ext_ssn"), type = "left")
+  
+  return(joined_df)
+}
+
+
+ChangeColNames <- function(form_df) {
+  # Changes col names to lower case and certain ones to a consistent names
+  # 
+  # Args:
+  #  form_df: ...
+  #
+  # Returns a vector of col names
+  # Note: when other functions gives error b/c variable doesn't exit then
+  #       modify the col_mapping below
+  col_mapping <- c("fstrPayerName1" = "fstrpayernameline1",
+                   'fstrPayerAccountNumber' = 'fstrpayeracctnumberforpayee',
+                   'fstrCorrectedReturnIndicator' = 'fstramendind',
+                   'flngRecordSequenceNumber' = "flngsequence",
+                   'fstrEmployerFEIN' = 'fstrpayertin') 
+  
+  
+  
+  col_names <- names(form_df)
+  
+  if(sum(str_detect(col_names, "flngSequence")) > 0){
+    col_mapping <- c("fstrPayerName1" = "fstrpayernameline1",
+                     'fstrPayerAccountNumber' = 'fstrpayeracctnumberforpayee',
+                     'fstrCorrectedReturnIndicator' = 'fstramendind',
+                     'fstrEmployerFEIN' = 'fstrpayertin')
+  }
+  
+  
+  col_names <- str_replace_all(col_names, col_mapping)
+  changed_col_names <- str_to_lower(col_names)
+  return(changed_col_names)
+}
+
+
+CountNonZeroCols <- function(form_df) {
+  # Count the number of nonzero values in columns that start with "fcur"
+  #
+  # Args:
+  #  form_df: data frame containing irmf data
+  # Returns a df two columns. One is the fcur col name and the other is a count of nonzero 
+  # entries in the corrosponding column
+  
+  distinct_tp <- form_df %>% distinct(ext_ssn) %>% count()
+  distinct_tp <- data.frame("column" = "distinct_tp",
+                            "count_nonzero" = distinct_tp[[1]]) %>% 
+    mutate_at("column", funs(as.character(.))) %>% 
+    mutate_at("count_nonzero", funs(as.double(.)))
+  
+  form_df2 <- form_df %>% select(starts_with("fcur"))
+  form_df2[is.na(form_df2)] <- 0
+  form_df2[form_df2 == "0.00"] <- 0
+  form_df2[form_df2 != "0"] <- 1
+  count_nonzero <- form_df2 %>% mutate_all(funs(as.double(.))) %>% summarise_all(funs(sum(.))) %>% gather("column", "count_nonzero")
+  count_nonzero <- bind_rows(distinct_tp, count_nonzero)
+  return(count_nonzero)
+}
+
+CheckOrRemoveDupes <- function(form_df) {
+  # Checks or removes possible duplicate forms
+  #
+  # Args:
+  #  form_df: ...
+  #
+  # Return: a  list of two dfs. first 1 is to explore possible dupes and the 2nd is 
+  #         with the possible dupes removed        
+  #
+  # Notes: some forms may look like there's dupes but it really isn't. same payer can pay
+  #        same payee the same amount (espeicially as Nominee). I checked if ssn is 
+  #        in fstrpayertin and its not
+  
+  # Some forms have invalid acct numbers
+  form_df <- form_df %>% 
+    mutate(fstrpayeracctnumberforpayee = 
+             ifelse(fstrpayeracctnumberforpayee == "00000000000000000000", 
+                    NA, fstrpayeracctnumberforpayee))
+  
+  currency_cols_index <- names(form_df) %>% str_detect("fcur")
+  currency_cols <- names(form_df)[currency_cols_index]
+  group_cols <- c(currency_cols, 'ext_ssn', 'fstridtype', 'fdtmfilingperiod', 
+                  'fstramendind', 'fstrpayeracctnumberforpayee', 'fstrpayertin')
+  
+  form_df_rn <- form_df %>%
+    arrange(fstramendind, flngsequence) %>%
+    mutate(dupe_key = paste0(ext_ssn, fstridtype, fdtmfilingperiod, 
+                             fstramendind, fstrpayeracctnumberforpayee, fstrpayertin)) %>%
+    group_by_at(group_cols) %>% 
+    mutate(dupe_grp_rn = row_number()) %>%
+    ungroup()
+  
+  key2 <- form_df_rn %>% distinct(dupe_key) %>% mutate(dupe_key2 = row_number())
+  
+  form_df_rn <- form_df_rn %>% 
+    inner_join(key2, "dupe_key") %>% 
+    mutate(dupe = ifelse(dupe_grp_rn == 1, "org", "dupe"))
+  
+  possible_dupes_removed <- form_df_rn %>% filter(dupe_grp_rn == 1)
+  possible_dupes <- form_df_rn %>% filter(dupe_grp_rn != 1)
+  possible_dupes_w_orginal <- form_df_rn %>% 
+    filter(dupe_key2 %in%  possible_dupes$dupe_key2) %>%
+    select(dupe_key2, dupe_grp_rn, dupe, everything()) %>%
+    arrange(dupe_key2, dupe_grp_rn)
+  
+  check_remove <- list(possible_dupes_w_orginal, possible_dupes_removed)
+  
+  return(check_remove)
+}
+
+
+
+# modify this to be CheckOrFixState
+CheckOrFixState <- function(form_df) {
+  # check or correct payee state col based on city col
+  #
+  # Args:
+  #  form_df: data frame of long form data (ex. IRMFint), see queries in raw2 folder
+  #
+  # Returns a list with df to check city col and df with fixed state col
+  
+  # modify these strings when the function is working as it should
+  ma_pattern = " MA | MA$|BOSTON|MARLBOROUGH|NEEDHAM|ANDOVER|WESTON|MASSACHUSETTS"
+  ma_city = c()
+  not_MA = "BRAZIL|SINGAPORE|BELGIUM|BEIJING|URUGUAY"
+  
+  form_df_check <- form_df %>% 
+    mutate(maybeMA = str_detect(fstrpayeecity, ma_pattern),
+           notMA = str_detect(fstrpayeecity, not_MA),
+           fstrPayeeState2 = ifelse(maybeMA == TRUE & 
+                                      notMA == FALSE & 
+                                      fstrpayeestate %in% c(".", "**"),
+                                    "MA", fstrpayeestate)) 
+  
+  form_df_fixed <- form_df_check
+  form_df_fixed['fstrpayeestate'] <- form_df_fixed['fstrPayeeState2']
+  form_df_fixed <- form_df_fixed %>%
+    select(-fstrPayeeState2, -maybeMA, -notMA)
+  
+  form_df_check2 <- form_df_check %>% 
+    filter(fstrpayeestate %in% c(".", "**")) %>%
+    select(maybeMA, notMA, fstrpayeecity, fstrpayeestate,               
+           fstrPayeeState2, fstrpayeeaddress, everything()) %>%
+    arrange(desc(maybeMA))
+  
+  check_fix <- list(form_df_check2, form_df_fixed)
+  
+  return(check_fix)
+  
+}
+
+
+AmendForms <- function(form_df) {
+  # Removes invalid records when there is an updated record
+  #
+  # Args:
+  #  form_df: data frame of long form data (ex. IRMFint), see queries in raw2 folder
+  #
+  # Returns a df with amended and corrected forms that replace the orginal
+  # Note: There is probably .001 chance of error. It would be inaccurate is 
+  # if there is dupe record_key for original (F) form and they also have a amended (G) 
+  # or corrected (C) form with the same record key. It will replace all dupe F forms
+  # with a G or C form when it should probably only replace 1 of them. It's impossible 
+  # to fix perfectly but can be improved.
+  # The discovery uses different logic. I assume if F is amended with G and G is zero
+  # then the form was meant to be amended to zero but in the discovery they keep F if its
+  # amended with a zero G
+  
+  # Some forms have invalid acct numbers
+  form_df <- form_df %>% 
+    mutate(fstrpayeracctnumberforpayee = 
+             ifelse(fstrpayeracctnumberforpayee == "00000000000000000000", 
+                    NA, fstrpayeracctnumberforpayee),
+           # MA returns will have NA for fstramendind           
+           fstramendind = ifelse(is.na(fstramendind), "F", fstramendind)
+    )
+  
+  form_record <- form_df %>% 
+    mutate(year = str_replace(fdtmfilingperiod, "\\d{2}(\\d{2}).+", "\\1"),
+           record_key = paste0(fstridtype, ext_ssn,fstrpayertintype, fstrpayertin, 
+                               fstrpayeracctnumberforpayee, year),
+           amend_rank = ifelse(fstramendind == "F", 1, 
+                               ifelse(fstramendind == "G", 2,
+                                      ifelse(fstramendind == "C", 3, 0)))) %>%
+    arrange(record_key, amend_rank)
+  
+  record_key2 <- form_record %>% 
+    distinct(record_key) %>% 
+    mutate(record_key2 = row_number())
+  
+  form_record <- form_record %>% inner_join(record_key2, "record_key")
+  form_record <- form_record %>% 
+    group_by(record_key2) %>% 
+    mutate(grp_rn = row_number()) %>% 
+    ungroup() %>%
+    select(record_key2, grp_rn, fstramendind, amend_rank, everything())
+  
+  
+  f <- form_record %>% filter(fstramendind == "F")
+  g <- form_record %>% filter(fstramendind == "G")
+  c <- form_record %>% filter(fstramendind == "C")
+  
+  f_notIn_g <- f %>% filter(!(record_key2 %in% g$record_key2))
+  f_notIn_g_bind_g <- bind_rows(f_notIn_g, g)
+  f_notIn_g_bind_g_notIn_c <- f_notIn_g_bind_g %>% 
+    filter(!(record_key2 %in% c$record_key2))
+  f_notIn_g_bind_g_notIn_c_bind_c <- bind_rows(f_notIn_g_bind_g_notIn_c, c)
+  
+  orginal_amended <- list(form_record, f_notIn_g_bind_g_notIn_c_bind_c)
+  
+  return(orginal_amended)
+  
+}
+
+
+
+incomeCalc <- function(df, stateYear, stateYear2) {
+  # create a function to calculate taxable income
+  # do this later
+  
+  ordinary <- paste0("ordinary_income_",stateYear)
+  int_div <- paste0("interest_dividend_",state,"_",year)
+  cap_gain_ST <- paste0("capital_gain_loss_ST_",state,"_",year)
+}
+
+
+
+
+CalcProbability <- function(n, n_good, sample_size) {
+  # calculates probability of finding a bad observation
+  # args:
+  #  n: total observations
+  #  n_good: number of good observations
+  #  sample_size: sample size taken
+  # Note: this fails with integer overflow. can use gmp::chooseZ but can't install packages
+  # ex. CalcProbability(5000,4900,50)
+  top <- choose(n_good, sample_size)
+  bottom <- choose(n,sample_size)
+  as.double(1 - top/bottom)
+}
+
+FindSize <- function(n, accuracy, confidence) {
+  # finds amount of samples needed to have certain level of confidence for accuracy
+  # ex. FindSize(n = 1000, accuracy = .99, confidence = 0.99)
+  #     probability of the data being less than 99% accurate is less than .01
+  i <- 10
+  target_prob <- 0
+  n_good <- accuracy * n
+  while(target_prob < confidence) {
+    target_prob <- CalcProbability(n, n_good,i)
+    i <- i +1
+    
+  }
+  print(paste0(i, " samples needed to be ", confidence*100,
+               "% sure that the data is at least ", n_good/n*100, "% accurate." ))
+}
+
+
+
+SELECT outerRevRtns.*  
+                  FROM   (SELECT revRtns.*, 
+                                 rvsRtn = 1, 
+                                 Row_number() -- should use rank and iif fstrwho <> 'batch' then 1 else 2 to get the right fstrwho 
+                                   OVER ( 
+                                     partition BY flngaccountkey 
+                                     ORDER BY fdtmwhen DESC) AS rn 
+                          FROM   (SELECT r.* 
+                                  FROM   tbllead l 
+                                  INNER JOIN tblreturn r 
+                                    ON l.flngaccountkey = 
+                                       r.flngaccountkey 
+                                    AND l.flngaccountkey <> 0 
+                                    --and r.flngver = 0      
+                                    AND r.fdtmfilingperiod = 
+                                        '2013-12-31 00:00:00.000' 
+                                    AND r.fstrstatus = 'REVS' 
+                                  WHERE  l.fstrleadtype = 'EXTINF' 
+                                         AND l.flngver = 0) revRtns) 
+                         outerRevRtns 
+                  WHERE  rn = 1) rvs 
+				  
+				  
+rank() over(partition by fstrPayerAcctNumberForPayee,fstrPayerTIN 
+	order by iif(fcurInterest<>0 and fstrAmendInd='C',1,
+		iif(fcurInterest<>0 and fstrAmendInd='G',2,
+		iif(fcurInterest<>0 and fstrAmendInd='F',3,4)))) flngRkI,				  
